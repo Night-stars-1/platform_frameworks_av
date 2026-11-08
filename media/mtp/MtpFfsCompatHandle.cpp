@@ -16,7 +16,9 @@
 
 #include <android-base/logging.h>
 #include <android-base/properties.h>
+#ifndef RECOVERY_MTP
 #include <android_hardware_usb_flags.h>
+#endif
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>

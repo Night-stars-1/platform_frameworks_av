@@ -84,3 +84,33 @@ cc_library_shared {
     defaults: ["libmtp_defaults"],
     cflags: ["-DMTP_FUZZER"],
 }
+
+// BEGIN RECOVERY MTP TRANSPORT
+soong_config_module_type {
+    name: "recovery_mtp_transport_defaults_type",
+    module_type: "cc_defaults",
+    config_namespace: "recovery_mtp",
+    bool_variables: ["enabled"],
+    properties: ["enabled"],
+}
+recovery_mtp_transport_defaults_type {
+    name: "recovery_mtp_transport_opt_in",
+    enabled: false,
+    soong_config_variables: { enabled: { enabled: true, }, },
+}
+// Own the module here: libmtp_defaults contains relative source/include paths.
+// Only this Recovery library uses the guarded database-mediated implementation.
+cc_library_static {
+    name: "librecovery_mtp_transport",
+    defaults: ["libmtp_defaults", "recovery_mtp_transport_opt_in"],
+    recovery: true,
+    compile_multilib: "first",
+    exclude_srcs: ["MtpDevHandle.cpp", "MtpDevice.cpp", "MtpDeviceInfo.cpp", "MtpStorageInfo.cpp"],
+    exclude_shared_libs: ["libusbhost", "server_configurable_flags", "android.hardware.usb.flags-aconfig-cc-lib"],
+    // Some device packet sources include the host header outside MTP_HOST.
+    // No USB host code or library is used by this FunctionFS-only variant.
+    include_dirs: ["system/core/libusbhost/include"],
+    cflags: ["-UMTP_HOST", "-DRECOVERY_MTP"],
+    visibility: ["//bootable/recovery/mtp:__pkg__"],
+}
+// END RECOVERY MTP TRANSPORT

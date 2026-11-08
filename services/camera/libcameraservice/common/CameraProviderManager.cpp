@@ -587,6 +587,8 @@ status_t CameraProviderManager::getTorchStrengthLevel(const std::string &id,
     // Otherwise fallback to the default impl.
     if (deviceInfo->hasFlashUnit() && supportsTorchStrengthControlExt()) {
         int32_t strength = getTorchStrengthLevelExt();
+        // diting: propagate extension I/O errors through the camera API.
+        if (strength < 0) return strength;
         *torchStrength = strength;
         return OK;
     } else {
@@ -611,8 +613,21 @@ status_t CameraProviderManager::turnOnTorchWithStrengthLevel(const std::string &
             return BAD_VALUE;
         }
 
-        deviceInfo->setTorchMode(torchStrength > 0);
+        // diting: HAL still owns torch enable and camera arbitration.
+        status_t result = deviceInfo->setTorchMode(true);
+        if (result != OK) return result;
         setTorchStrengthLevelExt(torchStrength, true);
+        const int32_t applied = getTorchStrengthLevelExt();
+        if (applied != torchStrength) {
+            ALOGE("%s: Torch extension failed, requested=%d actual=%d", __FUNCTION__,
+                    torchStrength, applied);
+            const status_t rollback = deviceInfo->setTorchMode(false);
+            if (rollback != OK) ALOGE("%s: Torch rollback failed: %d", __FUNCTION__, rollback);
+            const int32_t fallback = getTorchDefaultStrengthLevelExt();
+            setTorchStrengthLevelExt(fallback, false);
+            deviceInfo->mTorchStrengthLevel = fallback;
+            return applied < 0 ? applied : UNKNOWN_ERROR;
+        }
         deviceInfo->mTorchStrengthLevel = torchStrength;
         return OK;
     } else {
@@ -713,9 +728,22 @@ status_t CameraProviderManager::setTorchMode(const std::string &id, bool enabled
 
     res = deviceInfo->setTorchMode(enabled);
     if (deviceInfo->hasFlashUnit() && supportsTorchStrengthControlExt()) {
-        // Need to reset torch strength back to default when torch is turned off
+        // Keep the original non-extension path unchanged.
+        if (res != OK) return res;
+        // HAL off remains authoritative; the extension does not re-enable LEDs.
         int32_t defaultLevel = getTorchDefaultStrengthLevelExt();
         setTorchStrengthLevelExt(defaultLevel, enabled);
+        if (enabled) {
+            const int32_t applied = getTorchStrengthLevelExt();
+            if (applied != defaultLevel) {
+                ALOGE("%s: Default torch strength failed: %d", __FUNCTION__, applied);
+                const status_t rollback = deviceInfo->setTorchMode(false);
+                if (rollback != OK) ALOGE("%s: Torch rollback failed: %d", __FUNCTION__, rollback);
+                setTorchStrengthLevelExt(defaultLevel, false);
+                deviceInfo->mTorchStrengthLevel = defaultLevel;
+                return applied < 0 ? applied : UNKNOWN_ERROR;
+            }
+        }
         deviceInfo->mTorchStrengthLevel = defaultLevel;
     }
     return res;

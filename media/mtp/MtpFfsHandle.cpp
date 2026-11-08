@@ -16,7 +16,9 @@
 
 #include <android-base/logging.h>
 #include <android-base/properties.h>
+#ifndef RECOVERY_MTP
 #include <android_hardware_usb_flags.h>
+#endif
 #include <algorithm>
 #include <asyncio/AsyncIO.h>
 #include <dirent.h>
@@ -63,6 +65,25 @@ struct mtp_device_status {
 
 namespace android {
 
+// Recovery does not map normal Android aconfig storage. Keep close safety
+// enabled and preserve the established download IO ordering in this variant.
+static bool MtpCloseConcurrencyFix() {
+#ifdef RECOVERY_MTP
+    return true;
+#else
+    return android::hardware::usb::flags::mtp_ffs_handle_close_concurrency_fix();
+#endif
+}
+static bool MtpDownloadIoOrderImprovement() {
+#ifdef RECOVERY_MTP
+    return false;
+#else
+    return android::hardware::usb::flags::mtp_download_io_order_improvement();
+#endif
+}
+
+
+
 int MtpFfsHandle::getPacketSize(int ffs_fd) {
     struct usb_endpoint_descriptor desc;
     if (ioctl(ffs_fd, FUNCTIONFS_ENDPOINT_DESC, reinterpret_cast<unsigned long>(&desc))) {
@@ -84,7 +105,7 @@ MtpFfsHandle::~MtpFfsHandle() {
 }
 
 void MtpFfsHandle::setClosed(bool closed) {
-    if (android::hardware::usb::flags::mtp_ffs_handle_close_concurrency_fix()) {
+    if (MtpCloseConcurrencyFix()) {
         std::lock_guard<std::mutex> lock(mChildThreadsLock);
         mClosed = closed;
     }
@@ -309,7 +330,7 @@ int MtpFfsHandle::start(bool ptp) {
 }
 
 void MtpFfsHandle::close() {
-    if (android::hardware::usb::flags::mtp_ffs_handle_close_concurrency_fix()) {
+    if (MtpCloseConcurrencyFix()) {
         std::vector<std::future<void>> futuresToJoin;
         {
             std::lock_guard<std::mutex> lock(mChildThreadsLock);
@@ -615,7 +636,7 @@ int MtpFfsHandle::sendFile(mtp_file_range mfr) {
     int init_read_len = std::min(
             static_cast<uint64_t>(packet_size - sizeof(mtp_data_header)), file_length);
 
-    bool io_order_improvement = android::hardware::usb::flags::mtp_download_io_order_improvement();
+    bool io_order_improvement = MtpDownloadIoOrderImprovement();
 
     advise(mfr.fd);
 
@@ -733,7 +754,7 @@ int MtpFfsHandle::sendFile(mtp_file_range mfr) {
 int MtpFfsHandle::sendEvent(mtp_event me) {
     // Mimic the behavior of f_mtp by sending the event async.
     // Events aren't critical to the connection, so we don't need to check the return value.
-    if (android::hardware::usb::flags::mtp_ffs_handle_close_concurrency_fix()) {
+    if (MtpCloseConcurrencyFix()) {
         char *temp = new char[me.length];
         memcpy(temp, me.data, me.length);
         me.data = temp;

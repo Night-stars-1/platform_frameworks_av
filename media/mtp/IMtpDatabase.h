@@ -28,6 +28,15 @@ class MtpStringBuffer;
 
 class IMtpDatabase {
 public:
+#ifdef RECOVERY_MTP
+    // Recovery-only ABI: transfer paths never bypass the checked media database.
+    virtual bool recoveryStorageWritable() = 0;
+    virtual MtpResponseCode recoveryBeginUpload(const char* name, MtpObjectFormat format,
+            MtpObjectHandle parent, MtpStorageID storage, uint64_t size, MtpObjectHandle* handle) = 0;
+    virtual int recoveryUploadFd(MtpObjectHandle handle) = 0;
+    virtual MtpResponseCode recoveryFinishUpload(MtpObjectHandle handle, bool success) = 0;
+    virtual MtpResponseCode recoveryDelete(MtpObjectHandle handle) = 0;
+#endif
     virtual ~IMtpDatabase() {}
 
     // Called from SendObjectInfo to reserve a database entry for the incoming file.

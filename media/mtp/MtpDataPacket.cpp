@@ -29,6 +29,7 @@
 
 namespace android {
 
+#ifdef MTP_HOST
 namespace {
 // Reads the exact |count| bytes from |fd| to |buf|.
 // Returns |count| if it succeed to read the bytes. Otherwise returns -1. If it reaches EOF, the
@@ -49,6 +50,7 @@ ssize_t readExactBytes(int fd, void* buf, size_t count) {
     return read_count == count ? count : -1;
 }
 }  // namespace
+#endif  // MTP_HOST
 
 MtpDataPacket::MtpDataPacket()
     :   MtpPacket(MTP_BUFFER_SIZE),   // MAX_USBFS_BUFFER_SIZE

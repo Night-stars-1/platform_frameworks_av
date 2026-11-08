@@ -16,6 +16,9 @@
 
 #include <algorithm>
 #include <android-base/logging.h>
+#ifdef RECOVERY_MTP
+#include <android-base/file.h>
+#endif
 #include <android-base/properties.h>
 #include <chrono>
 #include <dirent.h>
@@ -45,7 +48,9 @@
 #include "android-base/strings.h"
 
 namespace android {
+#ifndef RECOVERY_MTP
 static const int SN_EVENT_LOG_ID = 0x534e4554;
+#endif
 
 static const MtpOperationCode kSupportedOperationCodes[] = {
     MTP_OPERATION_GET_DEVICE_INFO,
@@ -69,11 +74,19 @@ static const MtpOperationCode kSupportedOperationCodes[] = {
 //    MTP_OPERATION_POWER_DOWN,
     MTP_OPERATION_GET_DEVICE_PROP_DESC,
     MTP_OPERATION_GET_DEVICE_PROP_VALUE,
+#ifndef RECOVERY_MTP
     MTP_OPERATION_SET_DEVICE_PROP_VALUE,
+#endif
+#ifndef RECOVERY_MTP
     MTP_OPERATION_RESET_DEVICE_PROP_VALUE,
+#endif
 //    MTP_OPERATION_TERMINATE_OPEN_CAPTURE,
+#ifndef RECOVERY_MTP
     MTP_OPERATION_MOVE_OBJECT,
+#endif
+#ifndef RECOVERY_MTP
     MTP_OPERATION_COPY_OBJECT,
+#endif
     MTP_OPERATION_GET_PARTIAL_OBJECT,
 //    MTP_OPERATION_INITIATE_OPEN_CAPTURE,
     MTP_OPERATION_GET_OBJECT_PROPS_SUPPORTED,
@@ -89,10 +102,18 @@ static const MtpOperationCode kSupportedOperationCodes[] = {
 //    MTP_OPERATION_SKIP,
     // Android extension for direct file IO
     MTP_OPERATION_GET_PARTIAL_OBJECT_64,
+#ifndef RECOVERY_MTP
     MTP_OPERATION_SEND_PARTIAL_OBJECT,
+#endif
+#ifndef RECOVERY_MTP
     MTP_OPERATION_TRUNCATE_OBJECT,
+#endif
+#ifndef RECOVERY_MTP
     MTP_OPERATION_BEGIN_EDIT_OBJECT,
+#endif
+#ifndef RECOVERY_MTP
     MTP_OPERATION_END_EDIT_OBJECT,
+#endif
 };
 
 static const MtpEventCode kSupportedEventCodes[] = {
@@ -122,12 +143,19 @@ MtpServer::MtpServer(IMtpDatabase* database, int controlFd, bool ptp,
         mSendObjectFileSize(0),
         mSendObjectModifiedTime(0)
 {
+#ifdef RECOVERY_MTP
+    // The Recovery daemon supplies an already-open FunctionFS control fd.
+    {
+#else
     bool ffs_ok = access(FFS_MTP_EP0, W_OK) == 0;
     if (ffs_ok) {
+#endif
         bool aio_compat = android::base::GetBoolProperty("sys.usb.ffs.aio_compat", false);
         mHandle = aio_compat ? new MtpFfsCompatHandle(controlFd) : new MtpFfsHandle(controlFd);
+#ifndef RECOVERY_MTP
     } else {
         mHandle = new MtpDevHandle();
+#endif
     }
 }
 
@@ -245,6 +273,9 @@ void MtpServer::run() {
         }
     }
 
+#ifdef RECOVERY_MTP
+    mDatabase->recoveryFinishUpload(mSendObjectHandle, false);
+#endif
     // commit any open edits
     int count = mObjectEditList.size();
     for (int i = 0; i < count; i++) {
@@ -266,7 +297,6 @@ void MtpServer::sendObjectRemoved(MtpObjectHandle handle) {
     ALOGV("sendObjectRemoved %d\n", handle);
     sendEvent(MTP_EVENT_OBJECT_REMOVED, handle);
 }
-
 void MtpServer::sendObjectInfoChanged(MtpObjectHandle handle) {
     ALOGV("sendObjectInfoChanged %d\n", handle);
     sendEvent(MTP_EVENT_OBJECT_INFO_CHANGED, handle);
@@ -351,6 +381,30 @@ bool MtpServer::handleRequest() {
     }
 
     ALOGV("got command %s (%x)", MtpDebug::getOperationCodeName(operation), operation);
+
+#ifdef RECOVERY_MTP
+    // Only upload, delete and filename rename have fd-based Recovery handlers.
+    // Reject direct edit/move/copy paths before they can open a procfd O_RDWR.
+    switch (operation) {
+        case MTP_OPERATION_SET_DEVICE_PROP_VALUE:
+        case MTP_OPERATION_RESET_DEVICE_PROP_VALUE:
+        case MTP_OPERATION_MOVE_OBJECT:
+        case MTP_OPERATION_COPY_OBJECT:
+        case MTP_OPERATION_SEND_PARTIAL_OBJECT:
+        case MTP_OPERATION_TRUNCATE_OBJECT:
+        case MTP_OPERATION_BEGIN_EDIT_OBJECT:
+        case MTP_OPERATION_END_EDIT_OBJECT:
+        case MTP_OPERATION_SET_OBJECT_REFERENCES:
+        case MTP_OPERATION_SET_OBJECT_PROP_LIST:
+        case MTP_OPERATION_SEND_OBJECT_PROP_LIST:
+        case MTP_OPERATION_FORMAT_STORE:
+        case MTP_OPERATION_SET_OBJECT_PROTECTION:
+            mResponse.setResponseCode(MTP_RESPONSE_OPERATION_NOT_SUPPORTED);
+            return true;
+        default:
+            break;
+    }
+#endif
 
     switch (operation) {
         case MTP_OPERATION_GET_DEVICE_INFO:
@@ -542,7 +596,6 @@ MtpResponseCode MtpServer::doGetStorageIDs() {
 
     return MTP_RESPONSE_OK;
 }
-
 MtpResponseCode MtpServer::doGetStorageInfo() {
     MtpStringBuffer   string;
 
@@ -558,7 +611,11 @@ MtpResponseCode MtpServer::doGetStorageInfo() {
 
     mData.putUInt16(storage->getType());
     mData.putUInt16(storage->getFileSystemType());
+#ifdef RECOVERY_MTP
+    mData.putUInt16(mDatabase->recoveryStorageWritable() ? MTP_STORAGE_READ_WRITE : MTP_STORAGE_READ_ONLY_WITHOUT_DELETE);
+#else
     mData.putUInt16(storage->getAccessCapability());
+#endif
     mData.putUInt64(storage->getMaxCapacity());
     mData.putUInt64(storage->getFreeSpace());
     mData.putUInt32(1024*1024*1024); // Free Space in Objects
@@ -684,7 +741,11 @@ MtpResponseCode MtpServer::doSetObjectPropValue() {
     ALOGV("SetObjectPropValue %d %s\n", handle,
             MtpDebug::getObjectPropCodeName(property));
 
-    return mDatabase->setObjectPropertyValue(handle, property, mData);
+    const auto result = mDatabase->setObjectPropertyValue(handle, property, mData);
+#ifdef RECOVERY_MTP
+    if (result == MTP_RESPONSE_OK) sendObjectInfoChanged(handle);
+#endif
+    return result;
 }
 
 MtpResponseCode MtpServer::doGetDevicePropValue() {
@@ -834,8 +895,7 @@ MtpResponseCode MtpServer::doGetObject() {
     mfr.command = mRequest.getOperationCode();
     mfr.transaction_id = mRequest.getTransactionID();
 
-    // then transfer the file
-    int ret = mHandle->sendFile(mfr);
+    // then transfer the file    int ret = mHandle->sendFile(mfr);
     if (ret < 0) {
         ALOGE("Mtp send file got error %s", strerror(errno));
         if (errno == ECANCELED) {
@@ -943,10 +1003,14 @@ MtpResponseCode MtpServer::doSendObjectInfo() {
     MtpStorageID storageID = mRequest.getParameter(1);
     MtpStorage* storage = getStorage(storageID);
     MtpObjectHandle parent = mRequest.getParameter(2);
+#ifdef RECOVERY_MTP
+    if (storage) storageID = storage->getStorageID();
+#endif
     if (!storage)
         return MTP_RESPONSE_INVALID_STORAGE_ID;
 
     // special case the root
+#ifndef RECOVERY_MTP
     if (parent == MTP_PARENT_ROOT) {
         path.set(storage->getPath());
         parent = 0;
@@ -960,6 +1024,10 @@ MtpResponseCode MtpServer::doSendObjectInfo() {
             return MTP_RESPONSE_INVALID_PARENT_OBJECT;
     }
 
+#else
+    if (parent == MTP_PARENT_ROOT) parent = 0;
+    if (!mDatabase->recoveryStorageWritable()) return MTP_RESPONSE_STORE_READ_ONLY;
+#endif
     // read only the fields we need
     if (!mData.getUInt32(temp32)) return MTP_RESPONSE_INVALID_PARAMETER;  // storage ID
     if (!mData.getUInt16(temp16)) return MTP_RESPONSE_INVALID_PARAMETER;
@@ -988,6 +1056,15 @@ MtpResponseCode MtpServer::doSendObjectInfo() {
     if (!mData.getString(modified)) return MTP_RESPONSE_INVALID_PARAMETER;     // date modified
     // keywords follow
 
+#ifdef RECOVERY_MTP
+    MtpObjectHandle handle = kInvalidObjectHandle;
+    const auto result = mDatabase->recoveryBeginUpload(name, format, parent,
+            storage->getStorageID(), mSendObjectFileSize, &handle);
+    if (result != MTP_RESPONSE_OK) return result;
+    time_t modifiedTime = 0;
+    parseDateTime(modified, modifiedTime);
+    if (format == MTP_FORMAT_ASSOCIATION) sendObjectAdded(handle);
+#else
     int type = storage->getType();
     if (type == MTP_STORAGE_REMOVABLE_RAM) {
         std::string str = android::base::Trim(name);
@@ -1042,6 +1119,7 @@ MtpResponseCode MtpServer::doSendObjectInfo() {
         // SendObject does not get sent for directories, so call endSendObject here instead
         mDatabase->endSendObject(handle, MTP_RESPONSE_OK);
     }
+#endif
     mSendObjectFilePath = path;
     // save the handle for the SendObject call, which should follow
     mSendObjectHandle = handle;
@@ -1116,8 +1194,7 @@ MtpResponseCode MtpServer::doMoveObject() {
                 result = MTP_RESPONSE_GENERAL_ERROR;
             } else {
                 deletePath(fromPath);
-            }
-        } else {
+            }        } else {
             if (copyFile(fromPath, path)) {
                 result = MTP_RESPONSE_GENERAL_ERROR;
             } else {
@@ -1206,7 +1283,9 @@ MtpResponseCode MtpServer::doSendObject() {
     if (!hasStorage())
         return MTP_RESPONSE_GENERAL_ERROR;
     MtpResponseCode result = MTP_RESPONSE_OK;
+#ifndef RECOVERY_MTP
     mode_t mask;
+#endif
     int ret, initialData;
     bool isCanceled = false;
     struct stat sstat = {};
@@ -1225,6 +1304,14 @@ MtpResponseCode MtpServer::doSendObject() {
         result = MTP_RESPONSE_GENERAL_ERROR;
         goto done;
     }
+#ifdef RECOVERY_MTP
+    if (mData.getContainerType() != MTP_CONTAINER_TYPE_DATA ||
+        mData.getContainerCode() != MTP_OPERATION_SEND_OBJECT ||
+        mData.getTransactionID() != mRequest.getTransactionID()) {
+        result = MTP_RESPONSE_INVALID_PARAMETER;
+        goto done;
+    }
+#endif
     initialData = ret - MTP_CONTAINER_HEADER_SIZE;
 
     if (mSendObjectFormat == MTP_FORMAT_ASSOCIATION) {
@@ -1236,20 +1323,36 @@ MtpResponseCode MtpServer::doSendObject() {
         return result;
     }
 
+#ifdef RECOVERY_MTP
+    if (mSendObjectFileSize != UINT32_MAX && uint64_t(initialData) > mSendObjectFileSize) {
+        result = MTP_RESPONSE_INCOMPLETE_TRANSFER;
+        goto done;
+    }
+#endif
     mtp_file_range  mfr;
+#ifdef RECOVERY_MTP
+    mfr.fd = mDatabase->recoveryUploadFd(mSendObjectHandle);
+#else
     mfr.fd = open(mSendObjectFilePath, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+#endif
     if (mfr.fd < 0) {
         result = MTP_RESPONSE_GENERAL_ERROR;
         goto done;
     }
+#ifndef RECOVERY_MTP
     fchown(mfr.fd, getuid(), FILE_GROUP);
     // set permissions
     mask = umask(0);
     fchmod(mfr.fd, FILE_PERM);
     umask(mask);
+#endif
 
     if (initialData > 0) {
+#ifdef RECOVERY_MTP
+        ret = android::base::WriteFully(mfr.fd, mData.getData(), initialData) ? initialData : -1;
+#else
         ret = write(mfr.fd, mData.getData(), initialData);
+#endif
     }
 
     if (ret < 0) {
@@ -1286,11 +1389,17 @@ MtpResponseCode MtpServer::doSendObject() {
     }
 
     fstat(mfr.fd, &sstat);
+#ifdef RECOVERY_MTP
+    close(mfr.fd);
+#else
     closeObjFd(mfr.fd, mSendObjectFilePath);
+#endif
 
     if (ret < 0) {
         ALOGE("Mtp receive file got error %s", strerror(errno));
+#ifndef RECOVERY_MTP
         unlink(mSendObjectFilePath);
+#endif
         if (isCanceled)
             result = MTP_RESPONSE_TRANSACTION_CANCELLED;
         else
@@ -1301,7 +1410,15 @@ done:
     // reset so we don't attempt to send the data back
     mData.reset();
 
+#ifdef RECOVERY_MTP
+    if (mSendObjectHandle != kInvalidObjectHandle) {
+        const auto committed = mDatabase->recoveryFinishUpload(mSendObjectHandle, result == MTP_RESPONSE_OK);
+        if (result == MTP_RESPONSE_OK) result = committed;
+        if (result == MTP_RESPONSE_OK) sendObjectAdded(mSendObjectHandle);
+    }
+#else
     mDatabase->endSendObject(mSendObjectHandle, result == MTP_RESPONSE_OK);
+#endif
     mSendObjectHandle = kInvalidObjectHandle;
     mSendObjectFormat = 0;
     mSendObjectModifiedTime = 0;
@@ -1320,6 +1437,11 @@ MtpResponseCode MtpServer::doDeleteObject() {
     if (mRequest.getParameterCount() < 1)
         return MTP_RESPONSE_INVALID_PARAMETER;
     MtpObjectHandle handle = mRequest.getParameter(1);
+#ifdef RECOVERY_MTP
+    const auto result = mDatabase->recoveryDelete(handle);
+    if (result == MTP_RESPONSE_OK) sendObjectRemoved(handle);
+    return result;
+#else
     MtpObjectFormat format;
     // FIXME - support deleting all objects if handle is 0xFFFFFFFF
     // FIXME - implement deleting objects by format
@@ -1339,6 +1461,7 @@ MtpResponseCode MtpServer::doDeleteObject() {
 
     mDatabase->endDeleteObject(handle, success);
     return success ? result : MTP_RESPONSE_PARTIAL_DELETION;
+#endif
 }
 
 MtpResponseCode MtpServer::doGetObjectPropDesc() {
@@ -1370,8 +1493,7 @@ MtpResponseCode MtpServer::doGetDevicePropDesc() {
 }
 
 MtpResponseCode MtpServer::doSendPartialObject() {
-    if (!hasStorage())
-        return MTP_RESPONSE_INVALID_OBJECT_HANDLE;
+    if (!hasStorage())        return MTP_RESPONSE_INVALID_OBJECT_HANDLE;
     if (mRequest.getParameterCount() < 4)
         return MTP_RESPONSE_INVALID_PARAMETER;
     MtpObjectHandle handle = mRequest.getParameter(1);

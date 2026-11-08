@@ -55,7 +55,11 @@ int MtpStorage::getFileSystemType() const {
 }
 
 int MtpStorage::getAccessCapability() const {
+#ifdef RECOVERY_MTP
+    return MTP_STORAGE_READ_ONLY_WITHOUT_DELETE;
+#else
     return MTP_STORAGE_READ_WRITE;
+#endif
 }
 
 uint64_t MtpStorage::getMaxCapacity() {
