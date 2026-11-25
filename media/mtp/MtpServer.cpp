@@ -895,7 +895,8 @@ MtpResponseCode MtpServer::doGetObject() {
     mfr.command = mRequest.getOperationCode();
     mfr.transaction_id = mRequest.getTransactionID();
 
-    // then transfer the file    int ret = mHandle->sendFile(mfr);
+    // then transfer the file
+    int ret = mHandle->sendFile(mfr);
     if (ret < 0) {
         ALOGE("Mtp send file got error %s", strerror(errno));
         if (errno == ECANCELED) {
